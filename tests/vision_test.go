@@ -19,7 +19,7 @@ import (
     "testing"
     "time"
 
-    "zai-api/internal/zbridge"
+    "github.com/Godde3s/glm-free-api/internal/zbridge"
 )
 
 // tinyPNG is a valid 1x1 transparent PNG.

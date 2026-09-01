@@ -22,7 +22,7 @@ import (
     "time"
     "unicode/utf8"
 
-    "zai-api/internal/zbridge"
+    "github.com/Godde3s/glm-free-api/internal/zbridge"
 )
 
 func TestHTTPEndToEndGarbleFix(t *testing.T) {

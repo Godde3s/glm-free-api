@@ -368,10 +368,18 @@ func anthropicMessagesHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
 
+    // ── Multi-account: pick the account serving this request BEFORE vision
+    // processing (same contract as chatCompletionsHandler).
+    acc, accErr := acquireAccountForRequest(r.Context())
+    if accErr != nil {
+        writeJSON(w, 503, formatAnthropicError("rate_limit_error", accErr.Error()))
+        return
+    }
+
     // ── Vision: extract image_url parts (converted from Anthropic image ──
     // blocks), upload them to Z.AI, and strip them from the messages.
     // cleanedMessages is byte-identical to body.Messages when no images.
-    cleanedMessages, files, vErr := processVisionMessages(r.Context(), body.Messages)
+    cleanedMessages, files, vErr := processVisionMessagesAs(r.Context(), acc, body.Messages)
     if vErr != nil {
         writeJSON(w, 400, formatAnthropicError("invalid_request_error", vErr.Error()))
         return
@@ -419,6 +427,7 @@ func anthropicMessagesHandler(w http.ResponseWriter, r *http.Request) {
         ChatID:            chatID,
         ClientMessagesRaw: transformedMessages,
         ReasoningEffort:   body.ReasoningEffort,
+        Account:           acc,
         Files:             files,
     }
 
@@ -577,7 +586,7 @@ func anthropicStreamResponse(w http.ResponseWriter, prompt string, opts SendOpti
 
     fullContent := ""
 
-    ch, err := sendToZAI(prompt, opts)
+    ch, err := sendToZAIWithFailover(prompt, opts)
     if err != nil {
         close(keepAliveStop)
         wg.Wait()
@@ -729,7 +738,7 @@ func anthropicStreamResponse(w http.ResponseWriter, prompt string, opts SendOpti
 
 // anthropicNonStreamResponse produces a single Anthropic message object.
 func anthropicNonStreamResponse(w http.ResponseWriter, prompt string, opts SendOptions, model, requestId string) {
-    ch, err := sendToZAI(prompt, opts)
+    ch, err := sendToZAIWithFailover(prompt, opts)
     if err != nil {
         writeJSON(w, statusFromError(err.Error()), formatAnthropicError("api_error", err.Error()))
         return

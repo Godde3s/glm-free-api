@@ -62,6 +62,9 @@ type SendOptions struct {
     Messages          []Message
     ClientMessagesRaw json.RawMessage
     ReasoningEffort   string // "high" or "max"; only forwarded if model supports it
+    // Account pins this request to one Z.AI account (multi-account pool).
+    // nil = legacy single-session flow (guest or bare ZAI_TOKEN).
+    Account *Account
     // Files carries already-uploaded Z.AI file entries (see vision.go) to
     // attach to the upstream completion request as the top-level "files"
     // array. Empty for text-only requests (field then stays out of the body).

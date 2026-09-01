@@ -103,6 +103,13 @@ type resolvedImage struct {
 // The returned error is non-nil when the request is invalid (too many images)
 // or any download/upload failed; callers should surface it as a 400.
 func processVisionMessages(ctx context.Context, raw json.RawMessage) (json.RawMessage, []map[string]interface{}, error) {
+    return processVisionMessagesAs(ctx, nil, raw)
+}
+
+// processVisionMessagesAs is the account-aware variant: when the request
+// rides a pool account, uploads happen under THAT account's token so the
+// completion that references the files can actually access them.
+func processVisionMessagesAs(ctx context.Context, acc *Account, raw json.RawMessage) (json.RawMessage, []map[string]interface{}, error) {
     var messages []map[string]json.RawMessage
     if err := json.Unmarshal(raw, &messages); err != nil {
         // Not a JSON array of objects — nothing to extract; pass through.
@@ -169,7 +176,7 @@ func processVisionMessages(ctx context.Context, raw json.RawMessage) (json.RawMe
                 errs[idx] = err
                 return
             }
-            fileObj, err := uploadImageToZAI(ctx, img)
+            fileObj, err := uploadImageToZAIAs(ctx, acc, img)
             if err != nil {
                 errs[idx] = err
                 return
@@ -474,18 +481,27 @@ func downloadImage(ctx context.Context, rawURL string) (*resolvedImage, error) {
 // caller surfaces "file upload unauthorized (401)" as a 400. Vision therefore
 // requires ZAI_TOKEN to be set.
 func uploadImageToZAI(ctx context.Context, img *resolvedImage) (map[string]interface{}, error) {
+    return uploadImageToZAIAs(ctx, nil, img)
+}
+
+func uploadImageToZAIAs(ctx context.Context, acc *Account, img *resolvedImage) (map[string]interface{}, error) {
     var lastErr error
     for attempt := 0; attempt < 2; attempt++ {
-        session.mu.Lock()
-        token := session.Token
-        initialized := session.Initialized
-        session.mu.Unlock()
+        var token string
+        if acc != nil {
+            token = acc.Token // account mode: upload under the pool account
+        } else {
+            session.mu.Lock()
+            token = session.Token
+            initialized := session.Initialized
+            session.mu.Unlock()
 
-        if token == "" || !initialized {
-            if err := initializeSession(); err != nil {
-                return nil, fmt.Errorf("session init for file upload: %s", err.Error())
+            if token == "" || !initialized {
+                if err := initializeSession(); err != nil {
+                    return nil, fmt.Errorf("session init for file upload: %s", err.Error())
+                }
+                continue // re-read the fresh token
             }
-            continue // re-read the fresh token
         }
 
         var body bytes.Buffer

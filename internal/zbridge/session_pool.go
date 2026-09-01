@@ -158,14 +158,27 @@ func DeleteZAIChat(ctx context.Context, chatID string) error {
         return nil
     }
 
+    // Drop the account binding once this chat is finally dealt with so the
+    // map stays bounded by in-flight requests.
+    defer forgetChatAccount(chatID)
+
     for attempt := 0; attempt < 2; attempt++ {
+        var token string
+        // Multi-account: delete with the token that CREATED the chat,
+        // otherwise Z.AI answers 404 and dead chats pile up on the account.
+        if acc := lookupChatAccount(chatID); acc != nil {
+            token = acc.Token
+        } else {
+            session.mu.Lock()
+            token = session.Token
+            session.mu.Unlock()
+        }
         session.mu.Lock()
-        token := session.Token
         initialized := session.Initialized
         feVersion := session.FeVersion
         session.mu.Unlock()
 
-        if token == "" || !initialized {
+        if token == "" || (!initialized && lookupChatAccount(chatID) == nil) {
             // Own context: the triggering request may already be gone.
             if err := initializeSession(); err != nil {
                 return fmt.Errorf("session init for chat delete: %s", err.Error())

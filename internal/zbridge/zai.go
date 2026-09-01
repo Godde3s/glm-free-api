@@ -346,7 +346,9 @@ func sendToZAI(prompt string, opts SendOptions) (<-chan ZAIResult, error) {
         messages = defaultMessages
     }
 
-    if !initialized {
+    if !initialized && opts.Account == nil {
+        // Account mode carries its own credentials; only the legacy guest
+        // flow needs the global session initialized.
         if err := initializeSession(); err != nil {
             return nil, err
         }
@@ -358,6 +360,7 @@ func sendToZAI(prompt string, opts SendOptions) (<-chan ZAIResult, error) {
         Messages          []Message
         ClientMessagesRaw json.RawMessage
         Files             []map[string]interface{}
+        Account           *Account
     }{
         Model:             model,
         ChatID:            chatID,
@@ -365,6 +368,7 @@ func sendToZAI(prompt string, opts SendOptions) (<-chan ZAIResult, error) {
         Messages:          messages,
         ClientMessagesRaw: opts.ClientMessagesRaw,
         Files:             opts.Files,
+        Account:           opts.Account,
     }
 
     ch := make(chan ZAIResult, 100)
@@ -378,20 +382,143 @@ func sendToZAI(prompt string, opts SendOptions) (<-chan ZAIResult, error) {
     return ch, nil
 }
 
+// sendToZAIWithFailover wraps sendToZAI with the multi-account pre-flight
+// failover loop (Godde3s edition). The FIRST result of each attempt is
+// peeked: if it is a retryable upstream failure (429 rate limit, 401/403
+// auth) and another healthy account exists, the failed account is reported
+// to the pool and the whole attempt is retried on the next account — before
+// a single byte has reached the client, so the caller/handlers stay
+// completely unchanged. Anything that already started streaming is never
+// retried (same contract as GhostBrain's pre-stream failover).
+func sendToZAIWithFailover(prompt string, opts SendOptions) (<-chan ZAIResult, error) {
+    if accounts == nil || opts.Account == nil {
+        // Legacy path: guest session or bare ZAI_TOKEN, no pool machinery.
+        return sendToZAI(prompt, opts)
+    }
+
+    maxAttempts := accounts.Len()
+    if maxAttempts > 4 {
+        maxAttempts = 4 // sanity cap: don't chain more than 4 upstreams
+    }
+    if len(opts.Files) > 0 {
+        maxAttempts = 1 // uploaded files are bound to their account; no failover
+    }
+
+    acc := opts.Account
+    var lastErr error
+    for attempt := 0; attempt < maxAttempts; attempt++ {
+        opts.Account = acc
+        ch, err := sendToZAI(prompt, opts)
+        if err != nil {
+            accounts.Report(acc, err)
+            lastErr = err
+            next := accounts.pickOther(acc)
+            if next == nil {
+                break
+            }
+            logAlways(fmt.Sprintf("[Failover] %s failed to start (%v) -> retrying on %s",
+                acc.Label(), err, next.Label()))
+            acc = next
+            continue
+        }
+
+        // Peek the first result: a retryable error here still counts as
+        // "pre-stream" because nothing was emitted to the client yet.
+        first, ok := <-ch
+        if !ok {
+            lastErr = fmt.Errorf("Z.AI stream closed before producing any output")
+            accounts.Report(acc, lastErr)
+            next := accounts.pickOther(acc)
+            if next == nil {
+                break
+            }
+            logAlways(fmt.Sprintf("[Failover] %s stream died instantly -> retrying on %s",
+                acc.Label(), next.Label()))
+            acc = next
+            continue
+        }
+        if first.Err != nil && isRetryableUpstreamError(first.Err) && attempt < maxAttempts-1 {
+            accounts.Report(acc, first.Err)
+            next := accounts.pickOther(acc)
+            if next == nil {
+                // Nothing else to try: surface this attempt's result as-is.
+                return refeedChannel(ch, first), nil
+            }
+            logAlways(fmt.Sprintf("[Failover] %s hit %v -> retrying on %s (attempt %d/%d)",
+                acc.Label(), first.Err, next.Label(), attempt+2, maxAttempts))
+            acc = next
+            continue
+        }
+
+        // Success (or non-retryable / last attempt): hand the stream over.
+        if first.Err == nil {
+            acc.ReportOK()
+        } else {
+            accounts.Report(acc, first.Err)
+        }
+        bindChatAccount(opts.ChatID, acc)
+        return refeedChannel(ch, first), nil
+    }
+
+    if lastErr == nil {
+        lastErr = fmt.Errorf("all account failover attempts exhausted")
+    }
+    return nil, lastErr
+}
+
+// refeedChannel returns a fresh channel carrying `first` plus the rest of ch.
+func refeedChannel(ch <-chan ZAIResult, first ZAIResult) <-chan ZAIResult {
+    out := make(chan ZAIResult, 100)
+    out <- first
+    go func() {
+        for v := range ch {
+            out <- v
+        }
+        close(out)
+    }()
+    return out
+}
+
+// isRetryableUpstreamError reports whether an upstream error is worth a
+// failover attempt on another account (rate limit / auth), as opposed to a
+// permanent request problem (bad model, bad payload, captcha failure).
+func isRetryableUpstreamError(err error) bool {
+    if err == nil {
+        return false
+    }
+    switch statusFromError(err.Error()) {
+    case 429, 401, 403:
+        return true
+    default:
+        return false
+    }
+}
+
 func sendToZAIStream(prompt string, opts struct {
     Model, ChatID     string
     FeaturesMap       map[string]interface{}
     Messages          []Message
     ClientMessagesRaw json.RawMessage
     Files             []map[string]interface{}
+    Account           *Account
 }, ch chan<- ZAIResult) error {
 
     for attempt := 0; attempt < 2; attempt++ {
-        session.mu.Lock()
-        token := session.Token
-        userID := session.UserID
-        feVersion := session.FeVersion
-        session.mu.Unlock()
+        var token, userID, feVersion string
+        if opts.Account != nil {
+            // Multi-account mode: this request rides its own credentials.
+            token = opts.Account.Token
+            userID = opts.Account.UserID
+            session.mu.Lock()
+            feVersion = session.FeVersion
+            session.mu.Unlock()
+        } else {
+            session.mu.Lock()
+            token = session.Token
+            userID = session.UserID
+            feVersion = session.FeVersion
+            session.mu.Unlock()
+        }
 
         signature, _, _ := generateZaSignature(prompt, token, userID)
         urlStr := BASE_URL + "/api/v2/chat/completions"
@@ -490,6 +617,12 @@ func sendToZAIStream(prompt string, opts struct {
         if resp.StatusCode == 401 {
             resp.Body.Close()
             cancel()
+            if opts.Account != nil {
+                // Multi-account mode: let the failover wrapper route the
+                // request to another account instead of touching the
+                // legacy global session.
+                return fmt.Errorf("Z.AI error 401: account token rejected or expired")
+            }
             session.mu.Lock()
             session.Initialized = false
             session.mu.Unlock()

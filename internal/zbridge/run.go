@@ -62,17 +62,33 @@ func Run() {
     flag.Parse()
 
     if _, err := os.Stat(dbPath); err != nil {
-        log.Println("Captcha db not found! Please run the token collector first (cmd/token-collector)")
-        os.Exit(1)
+        // Auto-create an EMPTY token database so the server boots without
+        // the collector step. The captcha subsystem simply reports "no
+        // device tokens"; account mode (ZAI_TOKENS / ZAI_TOKEN) and guest
+        // mode don't need it at all.
+        log.Printf("[Startup] '%s' not found — creating an empty token database (collector optional)", dbPath)
+        if err := initDB(); err != nil {
+            fmt.Fprintf(os.Stderr, "Failed to create database: %v\n", err)
+            os.Exit(1)
+        }
+        if _, err := globalDB.Exec(`CREATE TABLE IF NOT EXISTS tokens (
+            id    INTEGER PRIMARY KEY AUTOINCREMENT,
+            token TEXT    NOT NULL,
+            batch INTEGER NOT NULL
+        )`); err != nil {
+            fmt.Fprintf(os.Stderr, "Failed to initialize database schema: %v\n", err)
+            os.Exit(1)
+        }
     }
-
-    logInfo("Starting with db-path='" + dbPath + "' verbose=true")
 
     if err := initDB(); err != nil {
         fmt.Fprintf(os.Stderr, "Failed to open database: %v\n", err)
         os.Exit(1)
     }
     defer globalDB.Close()
+
+    // ── Multi-account pool (ZAI_TOKENS > ZAI_TOKEN > guest mode) ────────
+    initAccounts()
 
     gRunning.Store(true)
 
@@ -91,12 +107,16 @@ func Run() {
     addr := fmt.Sprintf("%s:%d", config.Server.Host, config.Server.Port)
 
     tokenPadded := fmt.Sprintf("%-44s", config.Auth.Token)
+    accountsLine := "guest mode (no tokens)"
+    if accounts != nil {
+        accountsLine = fmt.Sprintf("%d account(s), round-robin + failover", accounts.Len())
+    }
     fmt.Printf(`
 ╔═══════════════════════════════════════════════════════════════╗
 ║           Z.AI Direct Bridge Server Started                   ║
 ╠═══════════════════════════════════════════════════════════════╣
 ║  Mode:          DIRECT HTTP (no browser needed)               ║
-║  Captcha IPC:   IN-MEMORY (no FIFO / named pipe)             ║
+║  Accounts:      %-46s║
 ║  Health:        http://localhost:%d/health               ║
 ╠═══════════════════════════════════════════════════════════════╣
 ║  OpenAI API:    http://localhost:%d/v1/chat/completions
@@ -104,10 +124,17 @@ func Run() {
 ╠═══════════════════════════════════════════════════════════════╣
 ║  Auth Token:    %s║
 ╚═══════════════════════════════════════════════════════════════╝
-`, config.Server.Port, config.Server.Port, config.Server.Port, tokenPadded)
+`, accountsLine, config.Server.Port, config.Server.Port, config.Server.Port, tokenPadded)
 
     go func() {
-        if err := initializeSession(); err != nil {
+        if accounts != nil {
+            // Account mode: each request carries its own credentials. The
+            // guest init still runs once just to fetch feVersion/features,
+            // but its failure is harmless and never blocks the pool.
+            if err := initializeSession(); err != nil {
+                logInfo("[Startup] Guest metadata init skipped (account mode active) — harmless.")
+            }
+        } else if err := initializeSession(); err != nil {
             log.Println("[Startup] Session init deferred — will retry on first request.")
         }
         // Warm up model cache
