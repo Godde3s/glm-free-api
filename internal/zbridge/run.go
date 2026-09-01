@@ -90,6 +90,8 @@ func Run() {
     // ── Multi-account pool (ZAI_TOKENS > ZAI_TOKEN > guest mode) ────────
     initAccounts()
 
+    logInfo("Starting with db-path='" + dbPath + "' verbose=true")
+
     gRunning.Store(true)
 
     if config.AgentMode {
