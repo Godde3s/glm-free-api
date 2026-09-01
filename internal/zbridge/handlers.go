@@ -55,10 +55,20 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
 
+    // ── Multi-account: pick the account serving this request BEFORE vision
+    // processing so uploaded files land under the same identity that later
+    // sends the completion. Blocks (bounded queue) while every account is
+    // rate-limited; nil account = legacy guest flow.
+    acc, accErr := acquireAccountForRequest(r.Context())
+    if accErr != nil {
+        writeJSON(w, 503, formatOpenAIError(accErr.Error(), "rate_limit_error", "account_pool_exhausted"))
+        return
+    }
+
     // ── Vision: extract image_url parts, upload them to Z.AI, strip them ──
     // from the messages. cleanedMessages is byte-identical to body.Messages
     // when the request carries no images (the common case).
-    cleanedMessages, files, vErr := processVisionMessages(r.Context(), body.Messages)
+    cleanedMessages, files, vErr := processVisionMessagesAs(r.Context(), acc, body.Messages)
     if vErr != nil {
         writeJSON(w, 400, formatOpenAIError(vErr.Error(), "invalid_request_error", nil))
         return
@@ -124,6 +134,7 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
         ChatID:            chatID,
         ClientMessagesRaw: transformedMessages,
         ReasoningEffort:   body.ReasoningEffort,
+        Account:           acc,
         Files:             files,
     }
 
@@ -214,7 +225,7 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
         }()
 
         errored := false
-        ch, err := sendToZAI(prompt, opts)
+        ch, err := sendToZAIWithFailover(prompt, opts)
         if err != nil {
             log.Printf("[Stream] Error: %s", err.Error())
             writeSSE(toJSON(formatOpenAIError(err.Error(), "api_error", statusFromError(err.Error()))))
@@ -341,7 +352,7 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
         wg.Wait()
 
     } else {
-        ch, err := sendToZAI(prompt, opts)
+        ch, err := sendToZAIWithFailover(prompt, opts)
         if err != nil {
             log.Printf("[API] Error: %s", err.Error())
             writeJSON(w, statusFromError(err.Error()), formatOpenAIError(err.Error(), "api_error", nil))
@@ -593,11 +604,25 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
     healthy := session.Initialized
     session.mu.Unlock()
 
+    // Account mode: the pool is healthy when at least one account can serve
+    // a request right now (guest/session init is then irrelevant).
+    poolOK := accounts != nil && accounts.HealthyCount() > 0
+    if poolOK {
+        healthy = true
+    }
+
     status := 200
     if !healthy {
         status = 503
     }
-    writeJSON(w, status, map[string]interface{}{"healthy": healthy, "mode": "direct"})
+    body := map[string]interface{}{"healthy": healthy, "mode": "direct"}
+    if accounts != nil {
+        body["accounts"] = map[string]interface{}{
+            "size":    accounts.Len(),
+            "healthy": accounts.HealthyCount(),
+        }
+    }
+    writeJSON(w, status, body)
 }
 
 func clientsHandler(w http.ResponseWriter, r *http.Request) {

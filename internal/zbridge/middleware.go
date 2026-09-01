@@ -89,8 +89,6 @@ func dashboardHandler(w http.ResponseWriter, r *http.Request) {
 
 func statusHandler(w http.ResponseWriter, r *http.Request) {
     session.mu.Lock()
-    defer session.mu.Unlock()
-
     var userIDPreview interface{}
     if session.UserID != "" {
         uid := session.UserID
@@ -99,15 +97,35 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
         }
         userIDPreview = uid + "..."
     }
+    feVersion := session.FeVersion
+    features := session.Features
+    initialized := session.Initialized
+    session.mu.Unlock()
 
-    writeJSON(w, 200, map[string]interface{}{
-        "connected":   session.Initialized,
+    body := map[string]interface{}{
+        "connected":   initialized,
         "userName":    session.UserName,
         "userId":      userIDPreview,
-        "feVersion":   session.FeVersion,
-        "features":    session.Features,
+        "feVersion":   feVersion,
+        "features":    features,
         "mode":        "direct",
         "sessionPool": sessionPoolStatus(),
-    })
+    }
+    if accounts != nil {
+        body["accountPool"] = map[string]interface{}{
+            "enabled": true,
+            "size":    accounts.Len(),
+            "healthy": accounts.HealthyCount(),
+        }
+        body["accounts"] = accounts.StatusJSON()
+    } else {
+        body["accountPool"] = map[string]interface{}{
+            "enabled": false,
+            "size":    0,
+            "healthy": 0,
+        }
+    }
+
+    writeJSON(w, 200, body)
 }
 

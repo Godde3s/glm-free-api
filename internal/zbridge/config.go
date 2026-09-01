@@ -4,6 +4,7 @@
 package zbridge
 
 import (
+    "bufio"
     "os"
     "strconv"
     "strings"
@@ -47,6 +48,16 @@ type Config struct {
         Default int
     }
     ZaiToken  string
+    // ZaiTokens holds the multi-account pool (ZAI_TOKENS="tok1,tok2,...").
+    // Priority: ZAI_TOKENS > ZAI_TOKEN > guest mode.
+    ZaiTokens []string
+    // AccountQueueTimeout bounds (seconds) how long a request waits in the
+    // queue when EVERY account is rate-limited/dead before a 503 is
+    // returned (ACCOUNT_QUEUE_TIMEOUT, default 120; 0 waits indefinitely).
+    AccountQueueTimeout int
+    // AccountCooldownBase is the first 429 cooldown in seconds; subsequent
+    // consecutive 429s double it (cap 30m) (ACCOUNT_COOLDOWN_BASE, default 60).
+    AccountCooldownBase int
     AgentMode bool
     // AgentModeVariant selects the agent-mode compatibility shim:
     //   "modern" (default) — XML-sectioned prompt shim ported from
@@ -79,7 +90,54 @@ type Config struct {
     SessionAcquireTimeout int
 }
 
+// loadDotEnv reads a `.env` file from the working directory (if present) and
+// injects its KEY=VALUE pairs into the process environment. Existing env vars
+// always win, so real environment overrides still work:
+//
+//      ZAI_TOKENS=token1,token2      # comma/semicolon/space separated
+//      AUTH_TOKEN=my-secret
+//      AGENT_MODE=1
+//
+// Comments (#) and blank lines are ignored; values may be single/double
+// quoted. This is what makes "copy .env.example to .env, run one file" work.
+func loadDotEnv() {
+    f, err := os.Open(".env")
+    if err != nil {
+        return // no .env — perfectly fine
+    }
+    defer f.Close()
+
+    sc := bufio.NewScanner(f)
+    for sc.Scan() {
+        line := strings.TrimSpace(sc.Text())
+        if line == "" || strings.HasPrefix(line, "#") {
+            continue
+        }
+        line = strings.TrimPrefix(line, "export ") // tolerate `export KEY=V`
+        eq := strings.Index(line, "=")
+        if eq <= 0 {
+            continue
+        }
+        key := strings.TrimSpace(line[:eq])
+        val := strings.TrimSpace(line[eq+1:])
+        if i := strings.Index(val, " #"); i >= 0 { // trailing comment
+            val = strings.TrimSpace(val[:i])
+        }
+        if len(val) >= 2 && (val[0] == '"' || val[0] == '\'') && val[len(val)-1] == val[0] {
+            val = val[1 : len(val)-1]
+        }
+        if key == "" {
+            continue
+        }
+        if os.Getenv(key) == "" { // real env wins over .env
+            _ = os.Setenv(key, val)
+        }
+    }
+}
+
 func loadConfig() *Config {
+    loadDotEnv()
+
     c := &Config{}
     c.Server.Port = 3001
     c.Server.Host = "0.0.0.0"
@@ -87,6 +145,8 @@ func loadConfig() *Config {
     c.Auth.Token = "Waguri"
     c.Timeouts.Default = 300000
     c.ZaiToken = ""
+    c.AccountQueueTimeout = 120
+    c.AccountCooldownBase = 60
     c.AgentMode = false
     c.AgentModeVariant = "modern"
     c.Logging.Level = "debug"
@@ -115,6 +175,21 @@ func loadConfig() *Config {
     }
     if t := os.Getenv("ZAI_TOKEN"); t != "" {
         c.ZaiToken = t
+    }
+    // Multi-account pool: ZAI_TOKENS="token1,token2,token3". Separators:
+    // comma / semicolon / whitespace / newline. De-duplicated in ParseTokensEnv.
+    if toks := ParseTokensEnv(); len(toks) > 0 {
+        c.ZaiTokens = toks
+    }
+    if t := os.Getenv("ACCOUNT_QUEUE_TIMEOUT"); t != "" {
+        if n, err := strconv.Atoi(t); err == nil && n >= 0 {
+            c.AccountQueueTimeout = n
+        }
+    }
+    if t := os.Getenv("ACCOUNT_COOLDOWN_BASE"); t != "" {
+        if n, err := strconv.Atoi(t); err == nil && n > 0 {
+            c.AccountCooldownBase = n
+        }
     }
     if am := os.Getenv("AGENT_MODE"); am != "" {
         switch strings.ToLower(am) {

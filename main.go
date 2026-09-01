@@ -9,7 +9,7 @@
 
 package main
 
-import "zai-api/internal/zbridge"
+import "github.com/Godde3s/glm-free-api/internal/zbridge"
 
 func main() {
     zbridge.Run()

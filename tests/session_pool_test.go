@@ -27,7 +27,7 @@ import (
     "testing"
     "time"
 
-    "zai-api/internal/zbridge"
+    "github.com/Godde3s/glm-free-api/internal/zbridge"
 )
 
 // ── stub backend ────────────────────────────────────────────────────────────

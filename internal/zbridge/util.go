@@ -68,6 +68,15 @@ func logInfo(msg string) {
     logMu.Unlock()
 }
 
+// logAlways prints important lifecycle events (account health, failovers,
+// cooldowns) regardless of the --verbose switch.
+func logAlways(msg string) {
+    ts := time.Now().UTC().Format("2006-01-02T15:04:05Z")
+    logMu.Lock()
+    fmt.Fprintf(os.Stderr, "[%s] %s\n", ts, msg)
+    logMu.Unlock()
+}
+
 // ============================================================================
 // BUFFER POOLS — eliminate GC pressure on hot paths
 // ============================================================================
