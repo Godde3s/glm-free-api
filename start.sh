@@ -69,7 +69,7 @@ fi
 
 # ── 4. Launch ───────────────────────────────────────────────────────────────
 say "Starting GLM-Free-API ..."
-printf "${DIM}  Dashboard:  http://localhost:${PORT:-3001}/health${OFF}\n"
+printf "${DIM}  Dashboard:  http://localhost:${PORT:-3001}/            ← بازش کن!${OFF}\n"
 printf "${DIM}  OpenAI:     http://localhost:${PORT:-3001}/v1/chat/completions${OFF}\n"
 printf "${DIM}  Anthropic:  http://localhost:${PORT:-3001}/v1/messages${OFF}\n"
 printf "${DIM}  Stop:       CTRL+C${OFF}\n\n"
