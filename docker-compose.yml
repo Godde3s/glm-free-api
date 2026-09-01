@@ -1,0 +1,19 @@
+# One command:  docker compose up -d
+# Put your tokens in a .env file next to this compose file first
+# (see .env.example) — compose reads it automatically.
+services:
+  glm-free-api:
+    build: .
+    # image: ghcr.io/godde3s/glm-free-api:latest   # uncomment when published
+    container_name: glm-free-api
+    ports:
+      - "${PORT:-3001}:${PORT:-3001}"
+    environment:
+      PORT: ${PORT:-3001}
+      AUTH_TOKEN: ${AUTH_TOKEN:-Waguri}
+      ZAI_TOKENS: ${ZAI_TOKENS:-}
+      ZAI_TOKEN: ${ZAI_TOKEN:-}
+      AGENT_MODE: ${AGENT_MODE:-false}
+      ACCOUNT_COOLDOWN_BASE: ${ACCOUNT_COOLDOWN_BASE:-60}
+      ACCOUNT_QUEUE_TIMEOUT: ${ACCOUNT_QUEUE_TIMEOUT:-120}
+    restart: unless-stopped
