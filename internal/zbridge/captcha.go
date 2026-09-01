@@ -426,13 +426,24 @@ func verifyCaptcha(certifyID, dataValue, deviceToken string) (string, error) {
 // COMPUTE FINAL PAYLOAD — tries tokens until success or exhausted
 // ============================================================================
 
-func computeFinalPayload() string {
+// errNoDeviceTokens marks the specific case where the tokens DB has no
+// device tokens to compute a captcha from. It is recoverable: the request
+// is sent without captcha_verify_param and Z.AI decides whether to accept
+// it — the bridge only hard-fails when Z.AI itself demands a verification
+// we could not produce.
+var errNoDeviceTokens = errors.New("no device tokens available for captcha")
+
+// computeFinalPayload tries up to maxTokenRetries device tokens and returns
+// the base64 CaptchaVerifyParam payload. Distinct outcomes:
+//   - ("", nil)                  -> computed, but Z.AI verification said no
+//   - ("", errNoDeviceTokens)    -> nothing to compute from (empty DB)
+//   - ("", err)                  -> infrastructure failure
+//   - (payload, nil)             -> success
+func computeFinalPayload() (string, error) {
     for attempt := 0; attempt < maxTokenRetries; attempt++ {
         deviceToken, ok := getNextToken()
         if !ok {
-            logError(fmt.Sprintf("No device tokens remaining (attempt %d/%d)",
-                attempt+1, maxTokenRetries))
-            return ""
+            return "", errNoDeviceTokens
         }
         logInfo(fmt.Sprintf("Attempt %d/%d using deviceToken=%s",
             attempt+1, maxTokenRetries, deviceToken))
@@ -444,12 +455,12 @@ func computeFinalPayload() string {
             continue
         }
         if payload != "" {
-            return payload
+            return payload, nil
         }
         logError("deviceToken=" + deviceToken + " produced empty payload, retrying")
     }
     logError(fmt.Sprintf("All %d token retries exhausted", maxTokenRetries))
-    return ""
+    return "", errors.New("captcha verification rejected every device token")
 }
 
 func tryCompute(deviceToken string) (string, error) {
@@ -586,11 +597,11 @@ func (c *CaptchaCache) Run() {
 
 func (c *CaptchaCache) generate() {
     startedAt := time.Now()
-    payload := computeFinalPayload()
-    
+    payload, err := computeFinalPayload()
+
     c.mu.Lock()
     c.generating--
-    if payload != "" {
+    if err == nil && payload != "" {
         c.params = append(c.params, cachedCaptcha{
             value:       payload,
             generatedAt: time.Now(),
@@ -625,7 +636,11 @@ func getCaptchaVerifyParam() (string, error) {
     ch := make(chan result, 1)
 
     go func() {
-        payload := computeFinalPayload()
+        payload, err := computeFinalPayload()
+        if err != nil {
+            ch <- result{"", err}
+            return
+        }
         if payload == "" {
             ch <- result{"", errors.New("captcha generation returned empty payload")}
             return

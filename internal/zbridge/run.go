@@ -62,11 +62,13 @@ func Run() {
     flag.Parse()
 
     if _, err := os.Stat(dbPath); err != nil {
-        // Auto-create an EMPTY token database so the server boots without
-        // the collector step. The captcha subsystem simply reports "no
-        // device tokens"; account mode (ZAI_TOKENS / ZAI_TOKEN) and guest
-        // mode don't need it at all.
-        log.Printf("[Startup] '%s' not found — creating an empty token database (collector optional)", dbPath)
+        // Auto-create an EMPTY token database so the server always boots.
+        // NOTE: chat completions still need device tokens inside this DB
+        // (they power the captcha Z.AI requires); seed it once with
+        // ./token-collector. Without them requests fail with
+        // FRONTEND_CAPTCHA_REQUIRED, which the API surfaces with a hint.
+        log.Printf("[Startup] '%s' not found — creating an empty token database", dbPath)
+        log.Printf("[Startup] chat needs device tokens: run ./token-collector once to fill '%s'", dbPath)
         if err := initDB(); err != nil {
             fmt.Fprintf(os.Stderr, "Failed to create database: %v\n", err)
             os.Exit(1)
