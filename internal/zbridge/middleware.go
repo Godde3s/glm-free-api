@@ -84,7 +84,7 @@ func dashboardHandler(w http.ResponseWriter, r *http.Request) {
         http.NotFound(w, r)
         return
     }
-    http.Redirect(w, r, "/health", http.StatusFound)
+    serveDashboard(w, r)
 }
 
 func statusHandler(w http.ResponseWriter, r *http.Request) {

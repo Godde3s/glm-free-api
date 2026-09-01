@@ -119,6 +119,7 @@ func Run() {
 ╠═══════════════════════════════════════════════════════════════╣
 ║  Mode:          DIRECT HTTP (no browser needed)               ║
 ║  Accounts:      %-46s║
+║  Dashboard:     http://localhost:%d/                   ║
 ║  Health:        http://localhost:%d/health               ║
 ╠═══════════════════════════════════════════════════════════════╣
 ║  OpenAI API:    http://localhost:%d/v1/chat/completions
@@ -126,7 +127,7 @@ func Run() {
 ╠═══════════════════════════════════════════════════════════════╣
 ║  Auth Token:    %s║
 ╚═══════════════════════════════════════════════════════════════╝
-`, accountsLine, config.Server.Port, config.Server.Port, config.Server.Port, tokenPadded)
+`, accountsLine, config.Server.Port, config.Server.Port, config.Server.Port, config.Server.Port, tokenPadded)
 
     go func() {
         if accounts != nil {

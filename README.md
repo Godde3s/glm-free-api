@@ -12,7 +12,7 @@
 **پل مستقیم به مدل‌های GLM** روی [chat.z.ai](https://chat.z.ai) — بدون مرورگر، بدون درایور، بدون دردسر.
 هر ابزاری که با API هوش مصنوعی کار کند، بلافاصله به GLM وصل می‌شود.
 
-`OpenAI /v1/chat/completions` · `Anthropic /v1/messages` · استریم واقعی SSE · تصویر (Vision) · ابزار (Tool-Calling) · **پشتیبانی چند اکانت**
+`OpenAI /v1/chat/completions` · `Anthropic /v1/messages` · استریم واقعی SSE · تصویر (Vision) · ابزار (Tool-Calling) · **پشتیبانی چند اکانت** · [داشبورد وب فارسی](#-داشبورد-وب--قلب-برنامه)
 
 </div>
 
@@ -42,6 +42,8 @@
 
 سرور روشن می‌شود و آدرس‌ها را نشان می‌دهد. همین.
 
+> 💡 بعد از اجرا، داشبورد فارسی را باز کن: **http://localhost:3001** — تست زنده، سلامت اکانت‌ها و کد آماده اتصال، همه در یک صفحه.
+
 ### راه ۲: با داکر (برای سرور)
 
 ```bash
@@ -55,6 +57,23 @@ docker compose up -d
 git clone https://github.com/Godde3s/glm-free-api.git && cd glm-free-api
 ./start.sh          # خودش بیلد می‌کند و اجرا می‌کند
 ```
+
+## 🖥️ داشبورد وب — قلب برنامه
+
+وقتی سرور روشن شد، مرورگر را باز کن:
+
+<div align="center">
+
+**http://localhost:3001**
+
+</div>
+
+یک پنل کنترل فارسی و تیره (داخل خود فایل — بدون هیچ فایل اضافه) که همین‌جا همه‌چیز را می‌بینی:
+
+- 🟢 **وضعیت زنده** سرور و تک‌تک اکانت‌ها (سالم / در حال استراحت با شمارش معکوس / مُرد)
+- 🔌 **پنل اتصال**: Base URL و API Key با دکمه کپی — برای وصل‌کردن Cursor، Cline یا هر ابزار دیگه
+- 🧪 **تست زنده**: مدل را انتخاب کن، پیام بفرست، استریم واقعی جواب را همان‌جا ببین — یعنی مطمئن می‌شی همه‌چیز کار می‌کنه بدون حتی ترمینال باز کردن
+- 📋 **کد آماده**: curl / Python / Node.js / تنظیم ایجنت — با مقادیر واقعی خودت، آماده کپی
 
 ## 🔑 توکن رایگان از کجا بیاورم؟ (۱۰ ثانیه)
 
@@ -159,6 +178,15 @@ print(resp.choices[0].message.content)
 
 </div>
 
+## 🖥️ Web dashboard
+
+Open **http://localhost:3001** after starting — a self-contained Persian/RTL dark dashboard compiled into the binary (no CDN, no assets, works offline):
+
+- live server + **per-account health** (healthy / cooling-down countdown / dead)
+- connect panel: base URL + key with copy buttons
+- **streaming playground** — pick a model, send a prompt, watch real SSE output
+- ready snippets: curl / Python / Node / agent setup, pre-filled with your URLs
+
 ## What is this?
 
 An **OpenAI- and Anthropic-compatible API bridge** for [chat.z.ai](https://chat.z.ai) — written in pure Go, **zero browser automation at runtime** (HTTP/2 directly, like the real web client). Point any AI tool at it and it behaves exactly like a real GLM API: streaming SSE, vision, tool-calling, thinking modes, live model catalog.
@@ -174,7 +202,8 @@ Forked and heavily upgraded from [izaart95-jpg/GLM-Free-API](https://github.com/
 | First run | collector + DB + go build required | **one file runs it** (`.env` optional, DB auto-created) |
 | Config | env vars only | **`.env` file support** (real env still wins) |
 | Install | clone + build | **prebuilt binaries** for 5 platforms via Releases |
-| Observability | session status | **per-account health** in `/health` + `/status` |
+| First contact | curl needed | **built-in web dashboard** with live test playground |
+| Observability | session status | **per-account health** in `/health` + `/status` + dashboard |
 | Tests | integration only | **+8 unit tests** for the pool (cooldown, failover, binding...) |
 
 ## 🚀 Quick start
