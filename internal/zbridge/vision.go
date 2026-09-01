@@ -554,6 +554,13 @@ func uploadImageToZAIAs(ctx context.Context, acc *Account, img *resolvedImage) (
 
         switch {
         case resp.StatusCode == 401:
+            if acc != nil {
+                // Account mode: this token is dead for uploads — report it
+                // and fail fast (files are bound to the account anyway, so
+                // retrying with the same token is pointless).
+                acc.ReportAuthFail("file upload unauthorized (401)")
+                return nil, fmt.Errorf("file upload unauthorized (401) — account %s rejected", acc.Label())
+            }
             session.mu.Lock()
             session.Initialized = false
             session.mu.Unlock()

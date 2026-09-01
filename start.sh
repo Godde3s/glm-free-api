@@ -31,7 +31,12 @@ if [ ! -f .env ]; then
     # non-interactive continue — guest mode still works without tokens
 fi
 
-# ── 2. Find or build the binary ────────────────────────────────────────────
+# ── 2. Pick up PORT from .env for the URL preview below ───────────────────
+if [ -f .env ]; then
+    set -a; . ./.env 2>/dev/null; set +a
+fi
+
+# ── 3. Find or build the binary ────────────────────────────────────────────
 BIN=""
 if [ -x ./zai-api ]; then BIN=./zai-api;
 elif [ -x ./zai-api-linux-amd64 ]; then BIN=./zai-api-linux-amd64;
@@ -62,7 +67,7 @@ EOF
     fi
 fi
 
-# ── 3. Launch ───────────────────────────────────────────────────────────────
+# ── 4. Launch ───────────────────────────────────────────────────────────────
 say "Starting GLM-Free-API ..."
 printf "${DIM}  Dashboard:  http://localhost:${PORT:-3001}/health${OFF}\n"
 printf "${DIM}  OpenAI:     http://localhost:${PORT:-3001}/v1/chat/completions${OFF}\n"
