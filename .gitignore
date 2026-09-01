@@ -1,6 +1,8 @@
 # Built binaries (anchored to the repo root so they never shadow source
 # directories like cmd/token-collector/)
 /zai-api
+/zai-api.exe
+/zai-api-*
 /zai-bridge
 /token-collector
 
