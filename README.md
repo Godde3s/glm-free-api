@@ -77,8 +77,11 @@ git clone https://github.com/Godde3s/glm-free-api.git && cd glm-free-api
 
 ## 🔑 توکن رایگان از کجا بیاورم؟ (۱۰ ثانیه)
 
-> بدون توکن هم می‌شود! (حالت مهمان فقط مدل `glm-5.3-flash` را می‌دهد)
+> بدون توکن هم می‌شود! (حالت مهمان فقط مدل `x-preview-l` را می‌دهد)
 > ولی با توکن، همه مدل‌ها + ارسال عکس + چند اکانت فعال می‌شود.
+>
+> ⚠️ **برای چت، در هر دو حالت `tokens.sqlite` باید دستگاه‌توکن داشته باشد** (کپچای Z.AI).
+> یک بار `./token-collector` را اجرا کن — بقیه‌اش خودکار است.
 
 1. برو به **[chat.z.ai](https://chat.z.ai)** و لاگین کن (حساب گوگل، چند ثانیه)
 2. دکمه **F12** را بزن → تب **Console** را باز کن
@@ -124,7 +127,7 @@ ZAI_TOKENS=توکن۱,توکن۲,توکن۳
 |---|---|
 | **Base URL** | `http://localhost:3001/v1` |
 | **API Key** | `Waguri` (یا هر چیزی که در `.env` گذاشتی) |
-| **مدل‌ها** | `glm-5.3` · `glm-5.3-flash` · `glm-5.2` · `GLM-5v-Turbo` و... |
+| **مدل‌ها** | `x-preview-l` (مهمان) · `glm-5.3` · `glm-5.2` · `GLM-5v-Turbo` و... (با توکن) |
 
 **نمونه با curl:**
 
@@ -133,7 +136,7 @@ curl http://localhost:3001/v1/chat/completions \
   -H "Authorization: Bearer Waguri" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "glm-5.3-flash",
+    "model": "x-preview-l",
     "messages": [{"role": "user", "content": "سلام! خودت رو معرفی کن"}],
     "stream": true
   }'
@@ -236,7 +239,13 @@ AUTH_TOKEN=Waguri                 # your clients' key (change if exposed!)
 AGENT_MODE=1                      # for agent frameworks (tool-calling)
 ```
 
-No tokens = guest mode (`glm-5.3-flash` works, vision does not).
+No tokens = guest mode (`x-preview-l` works, vision does not).
+
+> **Captcha note (both modes):** chat completions need **device tokens** in
+> `tokens.sqlite` — they power the captcha Z.AI requires. Seed once with
+> `./token-collector` (build: `go build -o token-collector ./cmd/token-collector`).
+> Each chat consumes one device token; 200 tokens ≈ 200 replies, re-run anytime.
+> Without them the API returns a clear `FRONTEND_CAPTCHA_REQUIRED` error.
 
 ## 🔀 Multi-account pool
 
@@ -334,7 +343,7 @@ image-gen/                 helper script for Z.AI image generation
 
 **Where do my conversations live?** Nowhere. Each request is stateless; the chat is deleted on Z.AI after the response. Your state lives entirely in your client's `messages` array.
 
-**Guest mode?** Works for quick tests (`glm-5.3-flash`), but rate limits are tighter and vision is unavailable. One token fixes both; several tokens make it a cluster.
+**Guest mode?** Works for quick tests (model `x-preview-l` only — everything else answers 403 `user level`), rate limits are tighter and vision is unavailable. One ZAI_TOKEN fixes all of that; several tokens make it a cluster.
 
 **My token expired — how do I know?** Its snapshot shows `"dead": true` in `/status`; grab a fresh one from chat.z.ai and update `.env`.
 

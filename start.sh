@@ -67,7 +67,26 @@ EOF
     fi
 fi
 
-# ── 4. Launch ───────────────────────────────────────────────────────────────
+# ── 4. Device tokens check (captcha) ────────────────────────────────────────
+# Chat completions need device tokens inside tokens.sqlite (they power the
+# captcha Z.AI requires). The collector harvests them with a headless browser.
+DB_HAS_TOKENS=0
+if [ -f tokens.sqlite ] && command -v sqlite3 >/dev/null 2>&1; then
+    [ "$(sqlite3 tokens.sqlite 'SELECT COUNT(*) FROM tokens;' 2>/dev/null || echo 0)" -gt 0 ] && DB_HAS_TOKENS=1
+elif [ -s tokens.sqlite ]; then
+    DB_HAS_TOKENS=1   # non-empty file, assume it is seeded
+fi
+
+if [ "$DB_HAS_TOKENS" = "0" ]; then
+    printf "\n${GOLD}⚠  tokens.sqlite is empty — chat replies need device tokens (captcha).${OFF}\n"
+    printf "${DIM}   Fix (one command, needs a browser download the first time):${OFF}\n"
+    printf "${DIM}     ./token-collector            ← interactive${OFF}\n"
+    printf "${DIM}     ./token-collector --no-tui --tokens 200 --batch 1 --parallel 1${OFF}\n\n"
+    printf "${DIM}   No token-collector binary?  Build it:  go build -o token-collector ./cmd/token-collector${OFF}\n"
+    printf "${DIM}   (The server still starts — only /v1/chat/completions needs them.)${OFF}\n\n"
+fi
+
+# ── 5. Launch ───────────────────────────────────────────────────────────────
 say "Starting GLM-Free-API ..."
 printf "${DIM}  Dashboard:  http://localhost:${PORT:-3001}/            ← بازش کن!${OFF}\n"
 printf "${DIM}  OpenAI:     http://localhost:${PORT:-3001}/v1/chat/completions${OFF}\n"

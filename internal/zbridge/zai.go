@@ -494,6 +494,21 @@ func isRetryableUpstreamError(err error) bool {
     }
 }
 
+// humanizeZAIError turns the most common upstream failures into plain,
+// actionable messages. Everything else passes through unchanged.
+func humanizeZAIError(detail string) string {
+    switch {
+    case strings.Contains(detail, "FRONTEND_CAPTCHA_REQUIRED"):
+        return detail + " — tokens.sqlite has no device tokens: run ./token-collector once " +
+            "to harvest them (they power the captcha the chat API requires)"
+    case strings.Contains(detail, "Model not available for current user level"):
+        return detail + " — guest sessions can only use 'x-preview-l'; other " +
+            "models need a logged-in ZAI_TOKEN in .env"
+    default:
+        return detail
+    }
+}
+
 func sendToZAIStream(prompt string, opts struct {
     Model, ChatID     string
     FeaturesMap       map[string]interface{}
@@ -534,9 +549,17 @@ func sendToZAIStream(prompt string, opts struct {
             messagesField = forwarded
         }
 
-        captchaParam, err := getCaptchaVerifyParam()
-        if err != nil {
-            return err
+        captchaParam, capErr := getCaptchaVerifyParam()
+        if capErr != nil {
+            if errors.Is(capErr, errNoDeviceTokens) {
+                // Empty device-token DB: degrade gracefully instead of failing
+                // the whole chat. Send the request without captcha_verify_param
+                // and let Z.AI decide; if it demands a captcha the response
+                // error surfaces to the client as usual.
+                logInfo("[Captcha] no device tokens — sending request without captcha_verify_param")
+            } else {
+                return capErr
+            }
         }
 
         // Build features payload from dynamically resolved per-model features.
@@ -554,13 +577,17 @@ func sendToZAIStream(prompt string, opts struct {
         featuresPayload["image_generation"] = false
 
         requestBody := map[string]interface{}{
-            "model":                opts.Model,
-            "chat_id":              opts.ChatID,
-            "messages":             messagesField,
-            "signature_prompt":     prompt,
-            "stream":               true,
-            "captcha_verify_param": captchaParam,
-            "features":             featuresPayload,
+            "model":            opts.Model,
+            "chat_id":          opts.ChatID,
+            "messages":         messagesField,
+            "signature_prompt": prompt,
+            "stream":           true,
+            "features":         featuresPayload,
+        }
+        // captcha_verify_param is only attached when one was actually
+        // computed — an empty/absent field is the graceful no-token path.
+        if captchaParam != "" {
+            requestBody["captcha_verify_param"] = captchaParam
         }
         // Attach uploaded files (images) only when present — text-only
         // requests keep the exact body shape they always had.
@@ -1001,7 +1028,7 @@ func streamSSEResponse(body io.Reader, ch chan<- ZAIResult) error {
             if config.Logging.Level == "debug" {
                 log.Println("[DEBUG] Z.AI inline SSE error:", errDetail)
             }
-            return fmt.Errorf("Z.AI error: %s", errDetail)
+            return fmt.Errorf("Z.AI error: %s", humanizeZAIError(errDetail))
         }
 
         if data, ok := j["data"].(map[string]interface{}); ok {
