@@ -263,7 +263,7 @@ Tuning: `ACCOUNT_COOLDOWN_BASE`, `ACCOUNT_QUEUE_TIMEOUT` (see `.env.example`).
 
 ## Features (inherited + hardened)
 
-- **Dual protocol** — OpenAI `/v1/chat/completions` + Anthropic `/v1/messages`; streaming (SSE, 5 s keep-alives) and non-streaming
+- **Dual protocol** — OpenAI `/v1/chat/completions` + Anthropic `/v1/messages` (+ `/v1/messages/count_tokens`); streaming (SSE, 5 s keep-alives) and non-streaming
 - **Vision** — images on both endpoints (OpenAI `image_url`, Anthropic `image` blocks; URL or base64), up to **10 images / 50 MB each**; uploads ride the *serving account's* token
 - **Agent mode** — translates OpenAI tools/roles into Z.AI's prompt format and rewrites `<<<TOOL_CALL>>>` blocks back into native `tool_calls` / `tool_use` (modern XML shim by default)
 - **Throwaway sessions** — every chat is deleted on Z.AI the moment its response completes (no context rot, no dead-session buildup); pre-warmed session pool by default (`--sync-mode` for the legacy flow)
