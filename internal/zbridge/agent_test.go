@@ -1110,14 +1110,15 @@ func TestAgentInterceptorAdapters(t *testing.T) {
         t.Errorf("modern adapter damaged prose: %q", content)
     }
 
-    // Legacy adapter: same input (canonical markers) also yields one call,
-    // streamed incrementally (header delta + argument fragments).
-    content, calls, _ = run(&legacyAgentInterceptor{in: newAgentStreamInterceptor()})
-    if calls != 1 {
-        t.Errorf("legacy adapter: %d calls, want 1", calls)
+    // Legacy variant: shares the same complete-call interceptor (incremental
+    // argument streaming was removed — see agentInterceptor).
+    withAgentVariant(t, "legacy")
+    content, calls, argFrags = run(newAgentInterceptor())
+    if calls != 1 || argFrags != 0 {
+        t.Errorf("legacy variant: %d calls / %d fragments, want 1 / 0", calls, argFrags)
     }
     if strings.Contains(content, "TOOL_CALL") {
-        t.Errorf("legacy adapter leaked markers: %q", content)
+        t.Errorf("legacy variant leaked markers: %q", content)
     }
 }
 
@@ -1139,15 +1140,14 @@ func TestAgentExtractStripDispatch(t *testing.T) {
     }
 
     withAgentVariant(t, "legacy")
-    // The legacy strict parser accepts the flat JSON but cannot resolve a
-    // tool name from it (name stays "") — exactly the failure mode the
-    // modern tolerant parser fixes.
+    // Both variants now share the tolerant parser, so the flat payload
+    // resolves on legacy too.
     legacyCalls := agentExtractToolCalls(flatPayload)
-    for _, tc := range legacyCalls {
-        fn, _ := tc["function"].(map[string]interface{})
-        if name, _ := fn["name"].(string); name != "" {
-            t.Errorf("legacy extract unexpectedly resolved name %q from flat payload", name)
-        }
+    if len(legacyCalls) != 1 {
+        t.Fatalf("legacy extract: %d calls for flat payload, want 1", len(legacyCalls))
+    }
+    if fn, _ := legacyCalls[0]["function"].(map[string]interface{}); fn["name"] != "bash" {
+        t.Errorf("legacy extract: name = %v, want bash", fn["name"])
     }
     // Canonical payload works on legacy too.
     canonical := "<<<TOOL_CALL>>>\n{\"name\":\"bash\",\"arguments\":{\"command\":\"id\"}}\n<<<END_TOOL_CALL>>>"

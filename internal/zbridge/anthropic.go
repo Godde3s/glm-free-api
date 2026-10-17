@@ -439,14 +439,25 @@ func anthropicMessagesHandler(w http.ResponseWriter, r *http.Request) {
     }
 
     if stream {
-        anthropicStreamResponse(w, prompt, opts, model, requestId)
+        anthropicStreamResponse(w, prompt, opts, model, requestId, body.Tools)
     } else {
-        anthropicNonStreamResponse(w, prompt, opts, model, requestId)
+        anthropicNonStreamResponse(w, prompt, opts, model, requestId, body.Tools)
     }
 }
 
 // anthropicStreamResponse converts a ZAIResult stream to Anthropic SSE events.
-func anthropicStreamResponse(w http.ResponseWriter, prompt string, opts SendOptions, model, requestId string) {
+//
+// tools is the request's tool list in OpenAI format (used by agent mode for
+// argument type coercion).
+//
+// Content-block invariant: a tool_use block is NEVER interrupted. Each tool
+// call is emitted as one complete block (start, the full input JSON as a
+// single input_json_delta, stop). Reasoning that arrives after a tool call has
+// been emitted is dropped: it used to close the open tool_use block and open
+// a thinking block, so the remaining input_json_delta fragments were sent
+// with the thinking block's index and the client saw truncated tool input
+// (e.g. {"command":"ls","timeout":50 … then 00} inside a thinking block).
+func anthropicStreamResponse(w http.ResponseWriter, prompt string, opts SendOptions, model, requestId string, tools json.RawMessage) {
     w.Header().Set("Content-Type", "text/event-stream")
     w.Header().Set("Cache-Control", "no-cache")
     w.Header().Set("Connection", "keep-alive")
@@ -534,6 +545,8 @@ func anthropicStreamResponse(w http.ResponseWriter, prompt string, opts SendOpti
     }
 
     toolCallEmitted := false
+    toolBlockIndex := -1 // index of the most recent tool_use block
+    droppedReasoning := 0
 
     // emitToolCallEvent converts one parsed tool-call (sub)delta into Anthropic
     // content-block events: a delta carrying an id starts a new tool_use block,
@@ -553,35 +566,47 @@ func anthropicStreamResponse(w http.ResponseWriter, prompt string, opts SendOpti
                 "name":  name,
                 "input": map[string]interface{}{},
             })
+            toolBlockIndex = blockIndex
             toolCallEmitted = true
             if argsStr != "" {
+                if !json.Valid([]byte(argsStr)) {
+                    if fixed, ok := repairToolJSON(argsStr); ok {
+                        argsStr = fixed
+                    }
+                }
                 writeEvent("content_block_delta", map[string]interface{}{
                     "type":  "content_block_delta",
-                    "index": blockIndex,
+                    "index": toolBlockIndex,
                     "delta": map[string]interface{}{
                         "type":         "input_json_delta",
                         "partial_json": argsStr,
                     },
                 })
+                // Complete call: close the block right away so nothing
+                // (text, reasoning, the next call) can ever land in it.
+                stopBlock()
             }
-        } else {
-            // Arguments delta — emit partial JSON
-            if argsStr != "" {
-                writeEvent("content_block_delta", map[string]interface{}{
-                    "type":  "content_block_delta",
-                    "index": blockIndex,
-                    "delta": map[string]interface{}{
-                        "type":         "input_json_delta",
-                        "partial_json": argsStr,
-                    },
-                })
+        } else if argsStr != "" && toolBlockIndex >= 0 {
+            // Arguments-only fragment: always route it to the tool_use
+            // block it belongs to, never to whatever block is current.
+            if currentBlockType != "tool_use" || blockIndex != toolBlockIndex {
+                log.Printf("[Anthropic] dropping orphan tool-args fragment (tool block %d already closed)", toolBlockIndex)
+                return
             }
+            writeEvent("content_block_delta", map[string]interface{}{
+                "type":  "content_block_delta",
+                "index": toolBlockIndex,
+                "delta": map[string]interface{}{
+                    "type":         "input_json_delta",
+                    "partial_json": argsStr,
+                },
+            })
         }
     }
 
     var interceptor agentInterceptor
     if config.AgentMode {
-        interceptor = newAgentInterceptor()
+        interceptor = newAgentInterceptorWith(tools)
     }
 
     fullContent := ""
@@ -607,6 +632,11 @@ func anthropicStreamResponse(w http.ResponseWriter, prompt string, opts SendOpti
 
         // Reasoning -> thinking content block
         if result.Reasoning != "" {
+            if toolCallEmitted || currentBlockType == "tool_use" {
+                // Never interrupt / follow a tool_use block with thinking.
+                droppedReasoning += len(result.Reasoning)
+                continue
+            }
             if currentBlockType != "thinking" {
                 stopBlock()
                 startBlock("thinking", map[string]interface{}{"thinking": ""})
@@ -628,7 +658,7 @@ func anthropicStreamResponse(w http.ResponseWriter, prompt string, opts SendOpti
             // A deep edit_content rewrite rewound text that was already
             // forwarded: reset the stale agent interceptor (issue #23).
             if interceptor != nil {
-                interceptor = newAgentInterceptor()
+                interceptor = newAgentInterceptorWith(tools)
             }
         }
         if result.FullText != "" {
@@ -705,7 +735,7 @@ func anthropicStreamResponse(w http.ResponseWriter, prompt string, opts SendOpti
 
         // Safety net: fallback tool call extraction at stream end
         if !toolCallEmitted {
-            toolCalls := agentExtractToolCalls(fullContent)
+            toolCalls := agentExtractToolCallsWith(fullContent, tools)
             for _, tc := range toolCalls {
                 emitToolCallEvent(tc)
             }
@@ -713,6 +743,9 @@ func anthropicStreamResponse(w http.ResponseWriter, prompt string, opts SendOpti
     }
 
     stopBlock()
+    if droppedReasoning > 0 {
+        logInfo(fmt.Sprintf("[Anthropic] dropped %d bytes of reasoning that arrived after a tool call", droppedReasoning))
+    }
 
     close(keepAliveStop)
     wg.Wait()
@@ -737,7 +770,7 @@ func anthropicStreamResponse(w http.ResponseWriter, prompt string, opts SendOpti
 }
 
 // anthropicNonStreamResponse produces a single Anthropic message object.
-func anthropicNonStreamResponse(w http.ResponseWriter, prompt string, opts SendOptions, model, requestId string) {
+func anthropicNonStreamResponse(w http.ResponseWriter, prompt string, opts SendOptions, model, requestId string, tools json.RawMessage) {
     ch, err := sendToZAIWithFailover(prompt, opts)
     if err != nil {
         writeJSON(w, statusFromError(err.Error()), formatAnthropicError("api_error", err.Error()))
@@ -773,9 +806,9 @@ func anthropicNonStreamResponse(w http.ResponseWriter, prompt string, opts SendO
     }
 
     if config.AgentMode {
-        toolCalls := agentExtractToolCalls(fullContent)
+        toolCalls := agentExtractToolCallsWith(fullContent, tools)
         if len(toolCalls) > 0 {
-            stripped := agentStripToolCalls(fullContent)
+            stripped := agentStripToolCallsWith(fullContent, tools)
             if stripped != "" {
                 content = append(content, map[string]interface{}{
                     "type": "text",
