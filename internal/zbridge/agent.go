@@ -133,34 +133,119 @@ func findAgentMarker(s, word string, final bool) (int, int) {
     }
 }
 
-// agentSpan marks one complete tool-call block in finished text:
-// [start,end) covers both markers, [bodyStart,bodyEnd) the JSON between them.
+// agentSpan marks one tool-call block in finished text:
+// [start,end) covers both markers, [bodyStart,bodyEnd) the payload between
+// them. kind tells which marker family opened it; terminated is false for a
+// block whose closing marker never arrived (only ever the last span).
 type agentSpan struct {
     start, bodyStart, bodyEnd, end int
+    kind                           int
+    terminated                     bool
 }
 
-// findAgentSpans walks every complete tolerant tool-call block in text.
-// An unterminated opening marker is ignored, matching the old literal scan.
+// Tool-call marker families.
+const (
+    toolKindAgent = iota // <<<TOOL_CALL>>> … <<<END_TOOL_CALL>>> (the contract)
+    toolKindGLM          // <tool_call> … </tool_call> (GLM-native fallback)
+)
+
+// findToolStart locates the earliest tool-call opening marker of either
+// family. It returns the marker index, its length and its kind, or
+// markerNone / markerIncomplete (see findAgentMarker).
+func findToolStart(s string, final bool) (int, int, int) {
+    a, alen := findAgentMarker(s, agentStartWord, final)
+    g := strings.Index(s, glmToolOpen)
+    if g >= 0 && (a < 0 || g < a) {
+        return g, len(glmToolOpen), toolKindGLM
+    }
+    return a, alen, toolKindAgent
+}
+
+// findToolEnd locates the closing marker matching kind in s.
+func findToolEnd(s string, kind int, final bool) (int, int) {
+    if kind == toolKindGLM {
+        if e := strings.Index(s, glmToolClose); e >= 0 {
+            return e, len(glmToolClose)
+        }
+        return markerNone, 0
+    }
+    e, elen := findAgentMarker(s, agentEndWord, final)
+    if e < 0 {
+        // Tolerate a GLM closer typed after a contract opener.
+        if g := strings.Index(s, glmToolClose); g >= 0 {
+            return g, len(glmToolClose)
+        }
+    }
+    return e, elen
+}
+
+// findAgentSpans walks every tool-call block in finished text. A trailing
+// unterminated block is reported with terminated=false so callers can try to
+// salvage it (the model was cut off or forgot the closing marker).
 func findAgentSpans(text string) []agentSpan {
     var spans []agentSpan
     for pos := 0; ; {
-        s, slen := findAgentMarker(text[pos:], agentStartWord, true)
+        s, slen, kind := findToolStart(text[pos:], true)
         if s < 0 {
             return spans
         }
         bodyStart := pos + s + slen
-        e, elen := findAgentMarker(text[bodyStart:], agentEndWord, true)
+        e, elen := findToolEnd(text[bodyStart:], kind, true)
         if e < 0 {
+            spans = append(spans, agentSpan{
+                start: pos + s, bodyStart: bodyStart, bodyEnd: len(text), end: len(text),
+                kind: kind, terminated: false,
+            })
             return spans
         }
         spans = append(spans, agentSpan{
-            start:     pos + s,
-            bodyStart: bodyStart,
-            bodyEnd:   bodyStart + e,
-            end:       bodyStart + e + elen,
+            start:      pos + s,
+            bodyStart:  bodyStart,
+            bodyEnd:    bodyStart + e,
+            end:        bodyStart + e + elen,
+            kind:       kind,
+            terminated: true,
         })
         pos = bodyStart + e + elen
     }
+}
+
+// parseToolBody turns one tool-call block body into (name, args JSON). It
+// accepts the contract JSON (repairing malformed JSON where unambiguous) and
+// the GLM-native <arg_key>/<arg_value> / attribute forms. Args are always a
+// valid JSON object coerced to the tool's schema. For GLM-native parses and
+// unterminated blocks the name must be a known tool when schemas are given,
+// so prose that merely mentions a marker is never turned into a call.
+func parseToolBody(body string, ts toolSchemas, kind int, terminated bool) (string, string, bool) {
+    raw := strings.TrimSpace(body)
+    raw = strings.TrimPrefix(raw, glmToolOpen)
+    raw = strings.TrimSpace(strings.TrimSuffix(raw, glmToolClose))
+    raw = agentFenceLead.ReplaceAllString(raw, "")
+    raw = agentFenceTail.ReplaceAllString(raw, "")
+    raw = strings.TrimSpace(raw)
+    known := func(n string) bool {
+        if len(ts) == 0 {
+            return true
+        }
+        _, ok := ts[n]
+        return ok
+    }
+    if name, args, ok := agentLooseParse(raw); ok && name != "" {
+        if !terminated && !known(name) {
+            return "", "", false
+        }
+        return name, normalizeToolArgs(name, args, ts), true
+    }
+    if name, args, ok := parseGLMNativeToolCall(raw, ts); ok && name != "" {
+        if !known(name) {
+            return "", "", false
+        }
+        if !terminated && args == "{}" {
+            return "", "", false
+        }
+        return name, args, true
+    }
+    return "", "", false
 }
 
 // ── prompt architecture ──────────────────────────────────────────────────────
@@ -810,8 +895,8 @@ func agentLooseParse(body string) (name string, args json.RawMessage, ok bool) {
     raw := strings.TrimSpace(body)
     raw = agentFenceLead.ReplaceAllString(raw, "")
     raw = agentFenceTail.ReplaceAllString(raw, "")
-    var obj map[string]json.RawMessage
-    if err := json.Unmarshal([]byte(raw), &obj); err != nil || len(obj) == 0 {
+    obj, ok := looseDecodeObject(raw)
+    if !ok || len(obj) == 0 {
         return "", nil, false
     }
     return agentExtractCall(obj)
@@ -843,26 +928,6 @@ func agentParseArguments(raw json.RawMessage) string {
     return "{}"
 }
 
-// agentStreamArguments mirrors the stream path: non-string values are
-// compacted, string values are used verbatim.
-func agentStreamArguments(raw json.RawMessage) string {
-    t := bytes.TrimSpace(raw)
-    if len(t) == 0 || bytes.Equal(t, []byte("null")) {
-        return "{}"
-    }
-    if t[0] == '"' {
-        var s string
-        if err := json.Unmarshal(t, &s); err == nil {
-            return s
-        }
-    }
-    var c bytes.Buffer
-    if json.Compact(&c, t) == nil {
-        return c.String()
-    }
-    return "{}"
-}
-
 // agentRandomHex returns n random bytes as lowercase hex (call-id suffixes).
 func agentRandomHex(n int) string {
     b := make([]byte, n)
@@ -872,22 +937,27 @@ func agentRandomHex(n int) string {
     return hex.EncodeToString(b)
 }
 
-// ParseAgentToolCalls extracts every complete tool-call block from finished
-// text and returns OpenAI-format tool_calls objects.
+// ParseAgentToolCalls extracts every tool-call block from finished text and
+// returns OpenAI-format tool_calls objects.
 func ParseAgentToolCalls(text string) []map[string]interface{} {
+    return parseAgentToolCallsWith(text, nil)
+}
+
+func parseAgentToolCallsWith(text string, ts toolSchemas) []map[string]interface{} {
     text = NormalizeAgentFences(text)
     var calls []map[string]interface{}
     for _, span := range findAgentSpans(text) {
-        name, args, ok := agentLooseParse(text[span.bodyStart:span.bodyEnd])
-        if !ok || name == "" {
+        name, args, ok := parseToolBody(text[span.bodyStart:span.bodyEnd], ts, span.kind, span.terminated)
+        if !ok {
             continue
         }
         calls = append(calls, map[string]interface{}{
-            "id":   "call_" + agentRandomHex(12),
-            "type": "function",
+            "index": len(calls),
+            "id":    "call_" + agentRandomHex(12),
+            "type":  "function",
             "function": map[string]interface{}{
                 "name":      name,
-                "arguments": agentParseArguments(args),
+                "arguments": args,
             },
         })
     }
@@ -896,10 +966,18 @@ func ParseAgentToolCalls(text string) []map[string]interface{} {
 
 // StripAgentToolCalls removes all tool-call blocks from finished text.
 func StripAgentToolCalls(text string) string {
+    return stripAgentToolCallsWith(text, nil)
+}
+
+func stripAgentToolCallsWith(text string, ts toolSchemas) string {
     text = NormalizeAgentFences(text)
     var kept strings.Builder
     prev := 0
     for _, span := range findAgentSpans(text) {
+        _, _, ok := parseToolBody(text[span.bodyStart:span.bodyEnd], ts, span.kind, span.terminated)
+        if !ok && !(span.kind == toolKindAgent && span.terminated) {
+            continue // not a call (e.g. prose mentioning a tag): keep it
+        }
         kept.WriteString(text[prev:span.start])
         prev = span.end
     }
@@ -913,6 +991,7 @@ func StripAgentToolCalls(text string) string {
 // blocks. It retains a short suffix so a marker split across upstream chunks
 // is never leaked to the client.
 type AgentStreamInterceptor struct {
+    schemas    toolSchemas // client tool schemas (argument type coercion)
     buffer     string
     offset     int
     callIndex  int
@@ -966,7 +1045,7 @@ func (in *AgentStreamInterceptor) drain(final bool) AgentParsedChunk {
         }
 
         rest := in.buffer[in.offset:]
-        start, markerLen := findAgentMarker(rest, agentStartWord, final)
+        start, markerLen, kind := findToolStart(rest, final)
         if start < 0 {
             if final {
                 // End of data: everything left is ordinary content.
@@ -1004,20 +1083,26 @@ func (in *AgentStreamInterceptor) drain(final bool) AgentParsedChunk {
             in.offset += start
         }
         bodyStart := in.offset + markerLen
-        idx, endMarkerLen := findAgentMarker(in.buffer[bodyStart:], agentEndWord, final)
-        if idx < 0 {
-            break // incomplete block: wait for more chunks
+        idx, endMarkerLen := findToolEnd(in.buffer[bodyStart:], kind, final)
+        terminated := idx >= 0
+        if !terminated {
+            if !final {
+                break // incomplete block: wait for more chunks
+            }
+            // Stream ended inside a block (closing marker never came):
+            // salvage the call if the payload is complete enough to parse
+            // instead of silently dropping it.
+            idx, endMarkerLen = len(in.buffer)-bodyStart, 0
         }
         end := bodyStart + idx
-        raw := strings.TrimSpace(in.buffer[bodyStart:end])
-        if name, args, ok := agentLooseParse(raw); ok && name != "" {
+        if name, args, ok := parseToolBody(in.buffer[bodyStart:end], in.schemas, kind, terminated); ok {
             toolCalls = append(toolCalls, map[string]interface{}{
                 "index": in.callIndex,
                 "id":    "call_" + agentRandomHex(12),
                 "type":  "function",
                 "function": map[string]interface{}{
                     "name":      name,
-                    "arguments": agentStreamArguments(args),
+                    "arguments": args,
                 },
             })
             in.callIndex++
@@ -1094,27 +1179,37 @@ func agentTransformMessages(rawMessages, toolsRaw json.RawMessage) ([]byte, erro
     return out, nil
 }
 
-// agentExtractToolCalls parses tool-call blocks out of finished assistant text
-// using the active shim's parser.
+// agentExtractToolCalls parses tool-call blocks out of finished assistant
+// text. Both shims share the tolerant parser (contract JSON with repair,
+// GLM-native fallback forms); the variants differ only in prompt layout.
 func agentExtractToolCalls(text string) []map[string]interface{} {
-    if config.agentModern() {
-        return ParseAgentToolCalls(text)
-    }
-    return extractAgentToolCalls(text)
+    return parseAgentToolCallsWith(text, nil)
 }
 
-// agentStripToolCalls removes tool-call blocks from finished assistant text
-// using the active shim's stripper.
+// agentExtractToolCallsWith is agentExtractToolCalls with the client's tool
+// schemas (OpenAI tools JSON) used for argument type coercion.
+func agentExtractToolCallsWith(text string, toolsRaw json.RawMessage) []map[string]interface{} {
+    return parseAgentToolCallsWith(text, buildToolSchemas(toolsRaw))
+}
+
+// agentStripToolCalls removes tool-call blocks from finished assistant text.
 func agentStripToolCalls(text string) string {
-    if config.agentModern() {
-        return StripAgentToolCalls(text)
-    }
-    return stripAgentToolCallBlocks(text)
+    return stripAgentToolCallsWith(text, nil)
+}
+
+func agentStripToolCallsWith(text string, toolsRaw json.RawMessage) string {
+    return stripAgentToolCallsWith(text, buildToolSchemas(toolsRaw))
 }
 
 // agentInterceptor is the uniform streaming-interceptor surface used by both
 // the OpenAI and Anthropic handlers. feed processes one upstream chunk;
 // finish drains the tail at end of stream.
+//
+// Every tool call is emitted as ONE complete delta (id + name + full,
+// valid, re-marshalled arguments JSON). Incremental argument streaming was
+// dropped: raw argument fragments cannot be repaired after the fact
+// (unescaped Windows paths, missing braces) and interleaved reasoning chunks
+// used to split them across Anthropic content blocks.
 type agentInterceptor interface {
     feed(chunk string) (content string, toolCalls []map[string]interface{})
     finish() (content string, toolCalls []map[string]interface{})
@@ -1134,25 +1229,14 @@ func (m *modernAgentInterceptor) finish() (string, []map[string]interface{}) {
     return p.Content, p.ToolCalls
 }
 
-// legacyAgentInterceptor adapts the legacy agentStreamInterceptor
-// (incremental argument streaming) to the agentInterceptor interface. Its
-// finish returns only trailing content; end-of-stream tool calls are caught
-// by the caller's extractAgentToolCalls safety net, as before.
-type legacyAgentInterceptor struct{ in *agentStreamInterceptor }
-
-func (l *legacyAgentInterceptor) feed(chunk string) (string, []map[string]interface{}) {
-    content, toolCalls, _ := l.in.feed(chunk)
-    return content, toolCalls
-}
-
-func (l *legacyAgentInterceptor) finish() (string, []map[string]interface{}) {
-    return l.in.flushFinal(), nil
-}
-
-// newAgentInterceptor constructs the streaming interceptor for the active shim.
+// newAgentInterceptor constructs the streaming interceptor (shared by both
+// shim variants) without schema information.
 func newAgentInterceptor() agentInterceptor {
-    if config.agentModern() {
-        return &modernAgentInterceptor{in: &AgentStreamInterceptor{}}
-    }
-    return &legacyAgentInterceptor{in: newAgentStreamInterceptor()}
+    return newAgentInterceptorWith(nil)
+}
+
+// newAgentInterceptorWith constructs the streaming interceptor with the
+// client's OpenAI-format tools for argument type coercion.
+func newAgentInterceptorWith(toolsRaw json.RawMessage) agentInterceptor {
+    return &modernAgentInterceptor{in: &AgentStreamInterceptor{schemas: buildToolSchemas(toolsRaw)}}
 }
