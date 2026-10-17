@@ -126,14 +126,14 @@ ZAI_TOKENS=توکن۱,توکن۲,توکن۳
 | تنظیم | مقدار |
 |---|---|
 | **Base URL** | `http://localhost:3001/v1` |
-| **API Key** | `Waguri` (یا هر چیزی که در `.env` گذاشتی) |
+| **API Key** | مقدار `AUTH_TOKEN` (اگر خالی باشد، کلید تصادفی در لاگ اجرا چاپ می‌شود) |
 | **مدل‌ها** | `x-preview-l` (مهمان) · `glm-5.3` · `glm-5.2` · `GLM-5v-Turbo` و... (با توکن) |
 
 **نمونه با curl:**
 
 ```bash
 curl http://localhost:3001/v1/chat/completions \
-  -H "Authorization: Bearer Waguri" \
+  -H "Authorization: Bearer $AUTH_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "x-preview-l",
@@ -149,7 +149,7 @@ from openai import OpenAI
 
 client = OpenAI(
     base_url="http://localhost:3001/v1",
-    api_key="Waguri",
+    api_key="<AUTH_TOKEN-from-the-startup-log>",
 )
 
 resp = client.chat.completions.create(
@@ -235,7 +235,7 @@ git clone https://github.com/Godde3s/glm-free-api.git && cd glm-free-api
 
 ```ini
 ZAI_TOKENS=token1,token2,token3   # multi-account: commas
-AUTH_TOKEN=Waguri                 # your clients' key (change if exposed!)
+AUTH_TOKEN=change-me              # clients' key — empty generates a random one
 AGENT_MODE=1                      # for agent frameworks (tool-calling)
 ```
 
@@ -281,7 +281,7 @@ Environment variables (or `.env` — same names, real env wins):
 | `ZAI_TOKENS` | *(empty)* | **Multi-account pool**, comma/semicolon/newline separated |
 | `ZAI_TOKEN` | *(empty)* | Legacy single token (`ZAI_TOKENS` wins) |
 | `PORT` / `HOST` | `3001` / `0.0.0.0` | Listen address |
-| `AUTH_TOKEN` | `Waguri` | Key clients must send (Bearer / `x-api-key`) |
+| `AUTH_TOKEN` | *(random per run)* | Key clients must send (Bearer / `x-api-key`); printed in the startup log |
 | `ACCOUNT_COOLDOWN_BASE` | `60` | First 429 cooldown (seconds), doubles per streak |
 | `ACCOUNT_QUEUE_TIMEOUT` | `120` | Seconds to wait when all accounts are cooling (0 = forever) |
 | `AGENT_MODE` | `false` | Tool-calling translation shim |
